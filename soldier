@@ -1,0 +1,320 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+
+#define MPU_ADDR 0x68
+
+#define BUTTON_PIN 3
+#define BUZZER_PIN 8
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+enum SystemState {
+  SAFE_STATE,
+  COUNTDOWN_STATE,
+  SOS_STATE
+};
+
+SystemState state = SAFE_STATE;
+
+// Demo GPS coordinates (Zduny 6, Bydgoszcz)
+double latitude = 53.1238;
+double longitude = 18.0107;
+bool gpsFix = true;
+
+float accelerationG = 1.0;
+
+unsigned long countdownStart = 0;
+const unsigned long countdownTime = 10000;
+
+int buttonPressCount = 0;
+unsigned long lastButtonPress = 0;
+
+unsigned long lastDisplayUpdate = 0;
+unsigned long lastSerialSend = 0;
+
+// ---------------- MPU ----------------
+
+void mpuWrite(byte reg, byte data) {
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(reg);
+  Wire.write(data);
+  Wire.endTransmission();
+}
+
+bool readMPU() {
+
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x3B);
+
+  if (Wire.endTransmission(false) != 0)
+    return false;
+
+  if (Wire.requestFrom(MPU_ADDR, 6) != 6)
+    return false;
+
+  int16_t ax = (Wire.read() << 8) | Wire.read();
+  int16_t ay = (Wire.read() << 8) | Wire.read();
+  int16_t az = (Wire.read() << 8) | Wire.read();
+
+  float fax = ax / 16384.0;
+  float fay = ay / 16384.0;
+  float faz = az / 16384.0;
+
+  accelerationG =
+      sqrt(fax * fax +
+           fay * fay +
+           faz * faz);
+
+  return true;
+}
+
+// ---------------- FALL DETECTION ----------------
+
+bool fallDetected() {
+
+  static unsigned long freeFallTime = 0;
+
+  if (accelerationG < 0.35) {
+    freeFallTime = millis();
+  }
+
+  if (freeFallTime > 0 &&
+      millis() - freeFallTime < 1500 &&
+      accelerationG > 2.30) {
+
+    freeFallTime = 0;
+    return true;
+  }
+
+  if (freeFallTime > 0 &&
+      millis() - freeFallTime > 1500) {
+
+    freeFallTime = 0;
+  }
+
+  return false;
+}
+
+// ---------------- BUTTON ----------------
+
+void checkButton() {
+
+  static bool lastState = HIGH;
+
+  bool currentState = digitalRead(BUTTON_PIN);
+
+  if (lastState == HIGH &&
+      currentState == LOW) {
+
+    unsigned long now = millis();
+
+    if (now - lastButtonPress < 1000)
+      buttonPressCount++;
+    else
+      buttonPressCount = 1;
+
+    lastButtonPress = now;
+
+    Serial.print("BUTTON COUNT: ");
+    Serial.println(buttonPressCount);
+
+    // Cancel countdown
+    if (state == COUNTDOWN_STATE) {
+
+      state = SAFE_STATE;
+
+      Serial.println("COUNTDOWN CANCELLED");
+    }
+
+    // Triple press = SOS
+    if (buttonPressCount >= 3) {
+
+      state = SOS_STATE;
+
+      buttonPressCount = 0;
+
+      Serial.println("MANUAL SOS ACTIVATED");
+    }
+
+    delay(50);
+  }
+
+  lastState = currentState;
+}
+
+// ---------------- BUZZER ----------------
+
+void doubleBeep() {
+
+  tone(BUZZER_PIN, 1200);
+  delay(200);
+
+  noTone(BUZZER_PIN);
+  delay(200);
+
+  tone(BUZZER_PIN, 1200);
+  delay(200);
+
+  noTone(BUZZER_PIN);
+}
+
+// ---------------- OLED ----------------
+
+void drawScreen() {
+
+  display.clearDisplay();
+
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+
+  display.setCursor(0, 0);
+
+  if (state == SAFE_STATE)
+    display.println("STATUS: SAFE");
+
+  if (state == COUNTDOWN_STATE)
+    display.println("STATUS: WARNING");
+
+  if (state == SOS_STATE)
+    display.println("STATUS: SOS");
+
+  display.print("ACC: ");
+  display.println(accelerationG, 2);
+
+  display.println("GPS DEMO MODE");
+
+  display.print("LAT:");
+  display.println(latitude, 4);
+
+  display.print("LNG:");
+  display.println(longitude, 4);
+
+  if (state == COUNTDOWN_STATE) {
+
+    long remaining =
+      10 - ((millis() - countdownStart) / 1000);
+
+    display.print("SOS IN: ");
+    display.println(remaining);
+  }
+
+  if (state == SOS_STATE) {
+
+    display.println("SOS ACTIVE");
+    display.println("LOCATION READY");
+  }
+
+  display.display();
+}
+
+// ---------------- SERIAL ----------------
+
+void sendSerial() {
+
+  if (state == SOS_STATE) {
+
+    Serial.print("SOS|");
+    Serial.print(latitude, 6);
+    Serial.print("|");
+    Serial.println(longitude, 6);
+
+    return;
+  }
+
+  Serial.print("SAFE|");
+  Serial.print(accelerationG, 2);
+  Serial.print("|");
+  Serial.print(latitude, 6);
+  Serial.print("|");
+  Serial.println(longitude, 6);
+}
+
+// ---------------- SETUP ----------------
+
+void setup() {
+
+  Serial.begin(115200);
+
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(BUZZER_PIN, OUTPUT);
+
+  noTone(BUZZER_PIN);
+
+  Wire.begin();
+
+  delay(500);
+
+  if (!display.begin(
+      SSD1306_SWITCHCAPVCC,
+      0x3C)) {
+
+    while (1);
+  }
+
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setCursor(10, 20);
+  display.println("BOOT");
+  display.display();
+
+  delay(2000);
+
+  mpuWrite(0x6B, 0x00);
+
+  Serial.println("SYSTEM READY");
+  Serial.println("GPS DEMO MODE");
+  Serial.println("ZDUNY 6 BYDGOSZCZ");
+}
+
+// ---------------- LOOP ----------------
+
+void loop() {
+
+  readMPU();
+
+  checkButton();
+
+  if (state == SAFE_STATE &&
+      fallDetected()) {
+
+    Serial.println("FALL DETECTED");
+
+    doubleBeep();
+
+    countdownStart = millis();
+
+    state = COUNTDOWN_STATE;
+  }
+
+  if (state == COUNTDOWN_STATE) {
+
+    if (millis() - countdownStart >=
+        countdownTime) {
+
+      Serial.println("SOS ACTIVATED");
+
+      state = SOS_STATE;
+    }
+  }
+
+  // NO BUZZER AFTER SOS
+  noTone(BUZZER_PIN);
+
+  if (millis() - lastDisplayUpdate > 250) {
+
+    lastDisplayUpdate = millis();
+
+    drawScreen();
+  }
+
+  if (millis() - lastSerialSend > 1000) {
+
+    lastSerialSend = millis();
+
+    sendSerial();
+  }
+}
