@@ -3,9 +3,11 @@
 #include <Adafruit_SSD1306.h>
 #include <math.h>
 
+// =====================================================
+// HARDWARE CONFIGURATION
+// =====================================================
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
-
 #define MPU_ADDR 0x68
 
 #define BUTTON_PIN 3
@@ -13,43 +15,87 @@
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
+// =====================================================
+// SYSTEM STATES
+// =====================================================
 enum SystemState {
   SAFE_STATE,
   COUNTDOWN_STATE,
-  SOS_STATE
+  SOS_STATE,
+  INFO_STATE,
+  DIAGNOSTIC_STATE
 };
 
 SystemState state = SAFE_STATE;
 
-// Demo GPS
+// =====================================================
+// SOLDIER PROFILE SYSTEM (EXPANDED)
+// =====================================================
+struct SoldierProfile {
+  String name;
+  String id;
+  String unit;
+  String bloodType;
+  String height;
+  String weight;
+  String bmi;
+  String allergies;
+  String medicalHistory;
+};
+
+SoldierProfile soldier = {
+  "OSCAR BOBB",
+  "010101",
+  "ALPHA",
+  "O+",
+  "180cm",
+  "75kg",
+  "23.1",
+  "NONE",
+  "NONE"
+};
+
+// =====================================================
+// GPS DEMO DATA
+// =====================================================
 double latitude = 53.1238;
 double longitude = 18.0107;
-bool gpsFix = true;
 
+// =====================================================
+// SENSOR DATA
+// =====================================================
 float accelerationG = 1.0;
 
+// =====================================================
+// TIMERS
+// =====================================================
 unsigned long countdownStart = 0;
 const unsigned long countdownTime = 10000;
-
-int buttonPressCount = 0;
-unsigned long lastButtonPress = 0;
 
 unsigned long lastDisplayUpdate = 0;
 unsigned long lastSerialSend = 0;
 
-// ---------------- SOLDIER INFO MODE ----------------
-bool infoMode = false;
-unsigned long infoModeStart = 0;
+// =====================================================
+// BUTTON SYSTEM
+// =====================================================
+int buttonPressCount = 0;
+unsigned long lastButtonPress = 0;
 
-String soldierName = "Monzer Mohamed";
-String soldierID = "037607";
-String bloodType = "O+";
-float heightCM = 180;
-float weightKG = 75;
-String allergies = "None";
-String medicalHistory = "None";
+// =====================================================
+// DEBUG SYSTEM (NEW)
+// =====================================================
+bool debugMode = true;
 
-// ---------------- MPU ----------------
+void debugPrint(String msg) {
+  if (debugMode) {
+    Serial.print("[DEBUG] ");
+    Serial.println(msg);
+  }
+}
+
+// =====================================================
+// MPU FUNCTIONS
+// =====================================================
 void mpuWrite(byte reg, byte data) {
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(reg);
@@ -58,43 +104,41 @@ void mpuWrite(byte reg, byte data) {
 }
 
 bool readMPU() {
-
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(0x3B);
 
-  if (Wire.endTransmission(false) != 0)
-    return false;
-
-  if (Wire.requestFrom(MPU_ADDR, 6) != 6)
-    return false;
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom(MPU_ADDR, 6) != 6) return false;
 
   int16_t ax = (Wire.read() << 8) | Wire.read();
   int16_t ay = (Wire.read() << 8) | Wire.read();
   int16_t az = (Wire.read() << 8) | Wire.read();
 
-  float fax = ax / 16384.0;
-  float fay = ay / 16384.0;
-  float faz = az / 16384.0;
+  float fx = ax / 16384.0;
+  float fy = ay / 16384.0;
+  float fz = az / 16384.0;
 
-  accelerationG = sqrt(fax * fax + fay * fay + faz * faz);
-
+  accelerationG = sqrt(fx * fx + fy * fy + fz * fz);
   return true;
 }
 
-// ---------------- FALL DETECTION ----------------
+// =====================================================
+// FALL DETECTION ALGORITHM
+// =====================================================
 bool fallDetected() {
-
   static unsigned long freeFallTime = 0;
 
   if (accelerationG < 0.35) {
     freeFallTime = millis();
+    debugPrint("Free fall detected");
   }
 
   if (freeFallTime > 0 &&
       millis() - freeFallTime < 1500 &&
-      accelerationG > 2.30) {
+      accelerationG > 2.3) {
 
     freeFallTime = 0;
+    debugPrint("Impact detected");
     return true;
   }
 
@@ -106,7 +150,9 @@ bool fallDetected() {
   return false;
 }
 
-// ---------------- BUTTON ----------------
+// =====================================================
+// BUTTON SYSTEM (5 PRESS = INFO, 6 PRESS = DIAGNOSTIC)
+// =====================================================
 void checkButton() {
 
   static bool lastState = HIGH;
@@ -123,66 +169,139 @@ void checkButton() {
 
     lastButtonPress = now;
 
-    Serial.print("BUTTON COUNT: ");
-    Serial.println(buttonPressCount);
+    debugPrint("Button press: " + String(buttonPressCount));
 
-    if (buttonPressCount == 5) {
-      infoMode = true;
-      infoModeStart = millis();
-      buttonPressCount = 0;
-      Serial.println("INFO MODE ON");
-    }
-
-    else if (buttonPressCount >= 3) {
+    // 3 PRESS = SOS
+    if (buttonPressCount == 3) {
       state = SOS_STATE;
       buttonPressCount = 0;
-      Serial.println("SOS MANUAL");
     }
 
+    // 5 PRESS = INFO
+    if (buttonPressCount == 5) {
+      state = INFO_STATE;
+      buttonPressCount = 0;
+    }
+
+    // 6 PRESS = DIAGNOSTIC MODE
+    if (buttonPressCount == 6) {
+      state = DIAGNOSTIC_STATE;
+      buttonPressCount = 0;
+    }
+
+    // cancel countdown
     if (state == COUNTDOWN_STATE) {
       state = SAFE_STATE;
-      Serial.println("CANCELLED");
     }
-
-    delay(50);
   }
 
   lastState = currentState;
 }
 
-// ---------------- BUZZER ----------------
-void doubleBeep() {
-  tone(BUZZER_PIN, 1200);
-  delay(200);
-  noTone(BUZZER_PIN);
-  delay(200);
-  tone(BUZZER_PIN, 1200);
-  delay(200);
+// =====================================================
+// BUZZER ALERT
+// =====================================================
+void alertBeep() {
+  tone(BUZZER_PIN, 1200); delay(150);
+  noTone(BUZZER_PIN); delay(150);
+  tone(BUZZER_PIN, 1200); delay(150);
   noTone(BUZZER_PIN);
 }
 
-// ---------------- OLED ----------------
+// =====================================================
+// ENCRYPTION STUB (THESIS FEATURE)
+// =====================================================
+String encryptPacket(String input) {
+  String output = "";
+
+  for (int i = 0; i < input.length(); i++) {
+    output += char(input[i] + 3); // simple Caesar shift
+  }
+
+  return output;
+}
+
+// =====================================================
+// SERIAL COMMUNICATION
+// =====================================================
+void sendSerial() {
+
+  String packet;
+
+  if (state == SOS_STATE) {
+    packet = "SOS|" + String(latitude, 6) + "|" + String(longitude, 6);
+  } else {
+    packet = "SAFE|" + String(accelerationG, 2);
+  }
+
+  String encrypted = encryptPacket(packet);
+
+  Serial.println(encrypted);
+}
+
+// =====================================================
+// OLED SCREENS
+// =====================================================
+void drawInfoScreen() {
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+
+  display.println("SOLDIER INFO");
+  display.println("----------------");
+
+  display.println("NAME: " + soldier.name);
+  display.println("ID: " + soldier.id);
+  display.println("UNIT: " + soldier.unit);
+  display.println("BLOOD: " + soldier.bloodType);
+  display.println("BMI: " + soldier.bmi);
+  display.println("H: " + soldier.height);
+  display.println("W: " + soldier.weight);
+  display.println("ALLERGY: " + soldier.allergies);
+
+  display.display();
+}
+
+void drawDiagnosticScreen() {
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+
+  display.println("SYSTEM DIAGNOSTIC");
+  display.println("----------------");
+
+  display.print("ACC: ");
+  display.println(accelerationG);
+
+  display.print("STATE: ");
+  display.println(state);
+
+  display.print("BUTTONS: ");
+  display.println(buttonPressCount);
+
+  display.print("GPS OK");
+
+  display.display();
+}
+
+// =====================================================
+// NORMAL SCREEN
+// =====================================================
 void drawScreen() {
 
   display.clearDisplay();
   display.setTextSize(1);
-  display.setTextColor(WHITE);
   display.setCursor(0, 0);
 
   if (state == SAFE_STATE) display.println("STATUS: SAFE");
   if (state == COUNTDOWN_STATE) display.println("STATUS: WARNING");
   if (state == SOS_STATE) display.println("STATUS: SOS");
 
-  display.print("ACC: ");
-  display.println(accelerationG, 2);
-
-  display.println("GPS DEMO");
-
-  display.print("LAT:");
-  display.println(latitude, 4);
-
-  display.print("LNG:");
-  display.println(longitude, 4);
+  display.print("ACC: "); display.println(accelerationG);
+  display.print("LAT: "); display.println(latitude);
+  display.print("LNG: "); display.println(longitude);
 
   if (state == COUNTDOWN_STATE) {
     long remaining = 10 - ((millis() - countdownStart) / 1000);
@@ -190,84 +309,21 @@ void drawScreen() {
     display.println(remaining);
   }
 
-  if (state == SOS_STATE) {
-    display.println("SOS ACTIVE");
-  }
-
   display.display();
 }
 
-// ---------------- INFO SCREEN ----------------
-void drawInfoScreen() {
-
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(WHITE);
-
-  display.setCursor(0, 0);
-  display.println("SOLDIER INFO");
-  display.println("----------------");
-
-  display.print("Name:");
-  display.println(soldierName);
-
-  display.print("ID:");
-  display.println(soldierID);
-
-  display.print("Blood:");
-  display.println(bloodType);
-
-  display.print("H:");
-  display.print(heightCM);
-  display.print(" W:");
-  display.println(weightKG);
-
-  float bmi = weightKG / ((heightCM / 100.0) * (heightCM / 100.0));
-
-  display.print("BMI:");
-  display.println(bmi, 1);
-
-  display.print("Allergy:");
-  display.println(allergies);
-
-  display.print("Hist:");
-  display.println(medicalHistory);
-
-  display.display();
-}
-
-// ---------------- SERIAL ----------------
-void sendSerial() {
-
-  if (state == SOS_STATE) {
-    Serial.print("SOS|");
-    Serial.print(latitude, 6);
-    Serial.print("|");
-    Serial.println(longitude, 6);
-    return;
-  }
-
-  Serial.print("SAFE|");
-  Serial.print(accelerationG, 2);
-  Serial.print("|");
-  Serial.print(latitude, 6);
-  Serial.print("|");
-  Serial.println(longitude, 6);
-}
-
-// ---------------- SETUP ----------------
+// =====================================================
+// SETUP
+// =====================================================
 void setup() {
 
   Serial.begin(115200);
-
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(BUZZER_PIN, OUTPUT);
 
   Wire.begin();
 
-  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    while (1);
-  }
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
 
   display.clearDisplay();
   display.setTextSize(2);
@@ -279,49 +335,33 @@ void setup() {
 
   mpuWrite(0x6B, 0x00);
 
-  Serial.println("READY");
+  debugPrint("SYSTEM INITIALIZED");
 }
 
-// ---------------- LOOP ----------------
+// =====================================================
+// LOOP
+// =====================================================
 void loop() {
 
   readMPU();
   checkButton();
 
-  if (!infoMode) {
+  if (state == SAFE_STATE && fallDetected()) {
+    alertBeep();
+    countdownStart = millis();
+    state = COUNTDOWN_STATE;
+  }
 
-    if (state == SAFE_STATE && fallDetected()) {
-      Serial.println("FALL DETECTED");
-      doubleBeep();
-      countdownStart = millis();
-      state = COUNTDOWN_STATE;
-    }
-
-    if (state == COUNTDOWN_STATE) {
-      if (millis() - countdownStart >= countdownTime) {
-        state = SOS_STATE;
-      }
-    }
+  if (state == COUNTDOWN_STATE &&
+      millis() - countdownStart > countdownTime) {
+    state = SOS_STATE;
   }
 
   noTone(BUZZER_PIN);
 
-  // INFO MODE SCREEN
-  if (infoMode) {
-
-    drawInfoScreen();
-
-    if (millis() - infoModeStart > 8000) {
-      infoMode = false;
-    }
-
-  } else {
-
-    if (millis() - lastDisplayUpdate > 250) {
-      lastDisplayUpdate = millis();
-      drawScreen();
-    }
-  }
+  if (state == INFO_STATE) drawInfoScreen();
+  else if (state == DIAGNOSTIC_STATE) drawDiagnosticScreen();
+  else drawScreen();
 
   if (millis() - lastSerialSend > 1000) {
     lastSerialSend = millis();
